@@ -1,0 +1,17 @@
+[project]
+name = "project-01-kafka"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Thanh Nguyen",email = "marcnguy4n@gmail.com"}
+]
+requires-python = ">=3.11"
+dependencies = [
+    "confluent-kafka (>=2.16.0,<3.0.0)",
+    "pyyaml (>=6,<7)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

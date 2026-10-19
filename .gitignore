@@ -1,0 +1,11 @@
+# Local Kafka configuration contains deployment details and credentials.
+/config/config.yml
+/config/config.yaml
+
+__pycache__/
+*/__pycache__
+*.py[cod]
+.venv/
+
+# Poetry
+poetry.lock

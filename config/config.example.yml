@@ -1,0 +1,11 @@
+# Copy to config.yml and replace the example values. Do not commit config.yml.
+kafka:
+  bootstrap.servers: "broker-1.example.com:9093,broker-2.example.com:9093"
+  security.protocol: "SASL_SSL"
+  sasl.mechanism: "SCRAM-SHA-512"
+
+  # Java clients only. confluent-kafka uses username/password below.
+  sasl.jaas.config: ""
+  username: "your-kafka-username"
+  password: "your-kafka-password"
+  topic: "your-topic"

@@ -29,14 +29,12 @@ def decode(data: bytes | None):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", help="YAML config path (default: config/config.yml)")
+    parser.add_argument("--config", help="YAML config path (default: config/mirror.yml)")
     parser.add_argument("--topic", help="Override the topic in config")
     parser.add_argument("--from-beginning")
-    parser.add_argument("--max-messages", type=int, default=10)
+    # parser.add_argument("--max-messages", type=int, default=10)
     parser.add_argument("--timeout", type=float, default=30, help="Total read timeout in seconds (default: 30)")
     args = parser.parse_args()
-    if args.max_messages <= 0:
-        parser.error("--max-messages must be positive")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--timeout must be finite and positive")
 
@@ -55,7 +53,7 @@ def main() -> int:
         consumer = Consumer(config)
         consumer.subscribe([args.topic or settings.topic])
         deadline = time.monotonic() + args.timeout
-        while count < args.max_messages:
+        while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -76,8 +74,7 @@ def main() -> int:
             # ASCII escapes keep redirected output portable on Windows.
             print(json.dumps(record, ensure_ascii=True), flush=True)
             count += 1
-        print(f"Read {count}/{args.max_messages} messages." + (" Timeout reached." if count < args.max_messages else ""), file=sys.stderr)
-        return 0 if count == args.max_messages else 1
+        print(f"Read total: {count} messages")
     except KeyboardInterrupt:
         print(f"Stopped after {count} messages.", file=sys.stderr)
         return 130

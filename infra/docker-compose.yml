@@ -1,11 +1,29 @@
 name: project-01-kafka
 
 services:
+  mongodb:
+    image: mongo:8.0
+    restart: unless-stopped
+    container_name: mongodb
+    ports:
+      - '127.0.0.1:27017:27017'
+    volumes:
+      - ./mongodb:/data/db
+    networks:
+      - project-02-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "quit(db.adminCommand({ ping: 1 }).ok ? 0 : 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   kafka-0:
     image: 'confluentinc/cp-kafka:7.6.1'
     networks:
       - project-02-net
     hostname: kafka-0
+    container_name: kafka-00
     ports:
       - '9094:9094'
     volumes:
@@ -41,6 +59,7 @@ services:
     networks:
       - project-02-net
     hostname: kafka-1
+    container_name: kafka-01
     ports:
       - '9194:9094'
     volumes:
@@ -75,6 +94,7 @@ services:
     networks:
       - project-02-net
     hostname: kafka-2
+    container_name: kafka-02
     ports:
       - '9294:9094'
     volumes:
@@ -145,7 +165,6 @@ networks:
     driver: bridge
 
 volumes:
-  mongodb_data:
   broker_data_0:
   broker_data_1:
   broker_data_2:

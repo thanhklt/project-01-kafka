@@ -1,11 +1,21 @@
 # Local Kafka configuration contains deployment details and credentials.
 /config/config.yml
 /config/config.yaml
+/config/mirror.yml
+/config/*.staging
+/logs/
 
 __pycache__/
 */__pycache__
 *.py[cod]
 .venv/
 
+# MongoDB files persisted from Docker.
+/infra/mongodb/*
+!/infra/mongodb/.gitkeep
+
 # Poetry
 poetry.lock
+
+# Superpowers artitfact
+docs/superpowers/

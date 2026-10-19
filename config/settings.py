@@ -39,13 +39,13 @@ class Settings:
 def load_settings(path: str | Path | None = None) -> Settings:
     """Read and validate a file. Call once at application startup.
 
-    The default is config.yml beside this module, independent of the current
+    The default is mirror.yml beside this module, independent of the current
     working directory. The example file is never loaded automatically.
     """
-    config_path = Path(path) if path is not None else Path(__file__).with_name("config.yml")
+    config_path = Path(path) if path is not None else Path(__file__).with_name("mirror.yml")
     if not config_path.is_file():
         raise FileNotFoundError(
-            f"Config file not found: {config_path}. Copy config.example.yml to config.yml first."
+            f"Config file not found: {config_path}. Copy mirror.example.yml to mirror.yml first."
         )
 
     try:
@@ -55,10 +55,12 @@ def load_settings(path: str | Path | None = None) -> Settings:
         # Parser errors may contain a source line with credentials.
         raise ValueError("Invalid YAML in config file.") from None
 
-    if not isinstance(data, dict) or not isinstance(data.get("kafka"), dict):
-        raise ValueError("Config must contain a 'kafka' mapping.")
+    return Settings(kafka=parse_kafka(data.get('source', data.get('kafka')) if isinstance(data, dict) else None))
 
-    kafka = data["kafka"]
+
+def parse_kafka(kafka) -> KafkaSettings:
+    if not isinstance(kafka, dict):
+        raise ValueError("Config must contain a Kafka settings mapping.")
 
     def read_string(key: str, *, allow_empty: bool = False) -> str:
         value = kafka.get(key)
@@ -71,7 +73,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         raise ValueError("Unsupported kafka.security.protocol.")
 
     uses_sasl = protocol.startswith("SASL_")
-    return Settings(kafka=KafkaSettings(
+    return KafkaSettings(
         bootstrap_servers=read_string("bootstrap.servers"),
         security_protocol=protocol,
         sasl_mechanism=read_string("sasl.mechanism", allow_empty=not uses_sasl),
@@ -79,4 +81,4 @@ def load_settings(path: str | Path | None = None) -> Settings:
         username=read_string("username", allow_empty=not uses_sasl),
         password=read_string("password", allow_empty=not uses_sasl),
         topic=read_string("topic"),
-    ))
+    )

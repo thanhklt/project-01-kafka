@@ -1,0 +1,28 @@
+source:
+  bootstrap.servers: source-broker.example.com:9094
+  security.protocol: SASL_PLAINTEXT
+  sasl.mechanism: PLAIN
+  sasl.jaas.config: ''
+  username: source-user
+  password: source-password
+  topic: product_view
+destination:
+  bootstrap.servers: localhost:9094,localhost:9194,localhost:9294
+  security.protocol: SASL_PLAINTEXT
+  sasl.mechanism: PLAIN
+  sasl.jaas.config: ''
+  username: local-user
+  password: local-password
+  topic: product_view
+mirror:
+  checkpoint_topic: _mirror_product_view_state_v1
+  consumer_count: 3
+  batch_max_records: 1
+  batch_max_bytes: 8388608
+  batch_wait_ms: 1000
+  transaction_timeout_ms: 60000
+  operation_timeout_seconds: 30
+  metadata_refresh_seconds: 30
+  retry_backoff_initial_ms: 500
+  retry_backoff_max_ms: 10000
+  progress_interval_seconds: 10

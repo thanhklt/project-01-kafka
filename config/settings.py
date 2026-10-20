@@ -1,6 +1,6 @@
 """Load Kafka settings from YAML without reading environment variables."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -14,7 +14,6 @@ class KafkaSettings:
     sasl_jaas_config: str
     username: str
     password: str
-    topic: str
 
     def to_client_config(self) -> dict[str, str]:
         """Return properties for confluent-kafka; topic is used separately."""
@@ -30,55 +29,63 @@ class KafkaSettings:
             })
         return config
 
+@dataclass(frozen=True)
+class MirrorSettings:
+    checkpoint_topic: str
+    consumer_count: int
+    batch_max_records: int
 
 @dataclass(frozen=True)
 class Settings:
-    kafka: KafkaSettings
+    source: KafkaSettings
+    destination: KafkaSettings
+    mirror: MirrorSettings
+
 
 
 def load_settings(path: str | Path | None = None) -> Settings:
     """Read and validate a file. Call once at application startup.
-
-    The default is mirror.yml beside this module, independent of the current
-    working directory. The example file is never loaded automatically.
     """
-    config_path = Path(path) if path is not None else Path(__file__).with_name("mirror.yml")
-    if not config_path.is_file():
-        raise FileNotFoundError(
-            f"Config file not found: {config_path}. Copy mirror.example.yml to mirror.yml first."
-        )
 
+    if path is None:
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    config_path = Path(path)
     try:
         with config_path.open(encoding="utf-8") as stream:
             data = yaml.safe_load(stream)
     except yaml.YAMLError:
         # Parser errors may contain a source line with credentials.
         raise ValueError("Invalid YAML in config file.") from None
-
-    return Settings(kafka=parse_kafka(data.get('source', data.get('kafka')) if isinstance(data, dict) else None))
-
-
-def parse_kafka(kafka) -> KafkaSettings:
-    if not isinstance(kafka, dict):
-        raise ValueError("Config must contain a Kafka settings mapping.")
-
-    def read_string(key: str, *, allow_empty: bool = False) -> str:
-        value = kafka.get(key)
-        if not isinstance(value, str) or (not allow_empty and not value.strip()):
-            raise ValueError(f"kafka.{key} must be a {'string' if allow_empty else 'non-empty string'}.")
-        return value
-
-    protocol = read_string("security.protocol")
-    if protocol not in {"PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"}:
-        raise ValueError("Unsupported kafka.security.protocol.")
-
-    uses_sasl = protocol.startswith("SASL_")
-    return KafkaSettings(
-        bootstrap_servers=read_string("bootstrap.servers"),
-        security_protocol=protocol,
-        sasl_mechanism=read_string("sasl.mechanism", allow_empty=not uses_sasl),
-        sasl_jaas_config=read_string("sasl.jaas.config", allow_empty=True),
-        username=read_string("username", allow_empty=not uses_sasl),
-        password=read_string("password", allow_empty=not uses_sasl),
-        topic=read_string("topic"),
+    config_obj_dict = parse_config(data)
+    return Settings(
+        source = config_obj_dict['source'],
+        destination = config_obj_dict['destination'],
+        mirror = config_obj_dict['mirror']
     )
+
+
+def parse_config(config: dict) -> dict[str, KafkaSettings | MirrorSettings]:
+    """Build the three settings objects from the YAML sections."""
+    if not isinstance(config, dict):
+        raise ValueError("Config must be a mapping.")
+
+    try:
+        source_config = config["source"]
+        destination_config = config["destination"]
+        mirror_config = config["mirror"]
+    except KeyError as e:
+        raise ValueError(f"Missing key in config: {e}") from None
+    
+    try:
+        source = KafkaSettings(**source_config)
+        destination = KafkaSettings(**destination_config)
+        mirror = MirrorSettings(**mirror_config)
+    except TypeError as e:
+        raise ValueError(f"Invalid config: {e}") from None
+    
+    return {"source": source, "destination": destination, "mirror": mirror}
+
+if __name__ == "__main__":
+    config = load_settings("config.yml")
+    print(config)

@@ -5,7 +5,6 @@ source:
   sasl_jaas_config: ''
   username: source-user
   password: source-password
-  topic: product_view
 destination:
   bootstrap_servers: localhost:9094,localhost:9194,localhost:9294
   security_protocol: SASL_PLAINTEXT
@@ -13,7 +12,6 @@ destination:
   sasl_jaas_config: ''
   username: local-user
   password: local-password
-  topic: product_view
 mirror:
   checkpoint_topic: _mirror_product_view_state_v1
   consumer_count: 3

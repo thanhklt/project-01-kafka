@@ -1,5 +1,5 @@
 import threading
-from confluent_kafka import Consumer, Producer, KafkaException
+from confluent_kafka import Consumer, Producer, KafkaException, TopicPartition
 
 from config.settings import load_settings
 
@@ -22,7 +22,10 @@ PRODUCER_CONFIG = {
 }
 
 
-def remote_to_local_kafka(worker_id, stop, count):
+def remote_to_local_kafka(worker_id, stop):
+    count = 0
+    batch_size = 500
+
     consumer_info = CONFIG.source.to_client_config()
     consumer_info.update(
         CONSUME_CONFIG
@@ -41,13 +44,17 @@ def remote_to_local_kafka(worker_id, stop, count):
     # Gọi poll()
     try:
         while not stop.is_set():
-            message = consumer.poll(timeout=1.0)
+            messages = consumer.consume(
+                num_messages=batch_size,
+                timeout=1.0
+            )
 
-            if message is None:
+            if len(messages) == 0:
                 continue  # Chưa có message, tiếp tục chờ
 
-            if message.error():
-                raise KafkaException(message.error())
+            for message in messages:
+                if message.error():
+                    raise KafkaException(message.error())
 
             delivery = {
                 "confirmed": False, 
@@ -56,31 +63,35 @@ def remote_to_local_kafka(worker_id, stop, count):
             def on_delivery(err, delivered_message):
                 delivery["confirmed"] = True
                 delivery["error"] = err
-
-            producer.produce(
-                topic=TOPIC_NAME,
-                value=message.value(),
-                on_delivery=on_delivery
-            )
+ 
+            next_offsets = {}
+            for message in messages:
+                producer.produce(
+                    topic=TOPIC_NAME,
+                    value=message.value(),
+                    on_delivery=on_delivery,
+                )
+                partition_key = (message.topic(), message.partition())
+                next_offsets[partition_key] = message.offset() + 1
             
             remaining = producer.flush(timeout=30) # Gửi hết tin nhắn
+            offsets = [
+                TopicPartition(topic, partition, offset)
+                for (topic, partition), offset in next_offsets.items()
+            ]
+            consumer.commit(
+                offsets=offsets, 
+                asynchronous=False
+            )
 
-            if remaining > 0 or not delivery["confirmed"]:
-                raise RuntimeError(
-                    f"Worker {worker_id}: chưa xác nhận gửi sang local"
-                )
-
-            consumer.commit(message=message, asynchronous=False)
-
+            count += batch_size
             if delivery["error"] != None:
                 raise KafkaException(delivery["error"])
-            count += 1
+                
             print(
-                f"Đã xử lý {count} message |"
                 f"Worker {worker_id} | "
-                f"Source partition {message.partition()} | "
-                f"Source offset {message.offset()} | "
-                f"Đã gửi vào local cluster và commit."
+                f"Batch {len(messages)} message | "
+                f"Tổng đã gửi và commit: {count}"
             )
     finally:
         consumer.close()
@@ -89,11 +100,10 @@ def remote_to_local_kafka(worker_id, stop, count):
         
 def main() -> None:
     stop = threading.Event()
-    count = 0
     threads = []
 
     for i in range(CONFIG.mirror.consumer_count):
-        threads.append(threading.Thread(target=remote_to_local_kafka, args=(i, stop, count)))
+        threads.append(threading.Thread(target=remote_to_local_kafka, args=(i, stop)))
     
     for thread in threads:
         thread.start()

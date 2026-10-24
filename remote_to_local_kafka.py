@@ -48,7 +48,7 @@ def remote_to_local_kafka(worker_id, stop):
                 num_messages=batch_size,
                 timeout=1.0
             )
-
+            success_message = 0
             if len(messages) == 0:
                 continue  # Chưa có message, tiếp tục chờ
 
@@ -61,6 +61,11 @@ def remote_to_local_kafka(worker_id, stop):
                 "error": None
             }
             def on_delivery(err, delivered_message):
+                nonlocal success_message
+
+                if err is None:
+                    success_message += 1
+
                 delivery["confirmed"] = True
                 delivery["error"] = err
  
@@ -71,6 +76,11 @@ def remote_to_local_kafka(worker_id, stop):
                     value=message.value(),
                     on_delivery=on_delivery,
                 )
+
+                # check if delivery success 
+                if delivery["confirmed"]:
+                    success_message += 1
+
                 partition_key = (message.topic(), message.partition())
                 next_offsets[partition_key] = message.offset() + 1
             
@@ -91,6 +101,7 @@ def remote_to_local_kafka(worker_id, stop):
             print(
                 f"Worker {worker_id} | "
                 f"Batch {len(messages)} message | "
+                f"Success message {success_message} |"
                 f"Tổng đã gửi và commit: {count}"
             )
     finally:

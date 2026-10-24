@@ -41,7 +41,7 @@ def local_kafka_to_mongo(worker_id, stop):
             messages = consumer.consume(
                 num_messages=batch_size,
                 timeout=1.0)
-            
+
             count += batch_size
 
             if len(messages) == 0:

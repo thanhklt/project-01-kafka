@@ -427,6 +427,22 @@ Chặng local → MongoDB cũng gom tối đa 500 message rồi dùng `insert_ma
 
 Các số liệu trên đến từ hai lần đo trong phiên 21/10/2026, dựa trên mức tăng offset local. Đây là kết quả quan sát trong môi trường chạy lúc đó, không phải benchmark kiểm soát cùng mọi điều kiện hay phép xác nhận dữ liệu đã mirror đầy đủ. Thư mục `logs/` được Git ignore nên ghi chép gốc chỉ có trong workspace local.
 
+### v1.0 — Đếm message gửi thành công ở luồng remote → local
+
+Bổ sung biến `success_message` trong `remote_to_local_kafka.py` để đếm số message được Kafka local xác nhận gửi thành công trong từng batch của mỗi worker.
+
+- Đặt `success_message = 0` khi bắt đầu xử lý batch.
+- Callback `on_delivery()` dùng `nonlocal success_message` và tăng biến khi `err is None`.
+- `producer.flush(timeout=30)` xử lý các delivery callback trong lúc chờ kết quả gửi; log hiển thị số xác nhận thành công ở trường `Success message`.
+
+Ví dụ log của một batch gửi thành công 500 message:
+
+```text
+Worker 0 | Batch 500 message | Success message 500 |Tổng đã gửi và commit: 500
+```
+
+`Success message` là số xác nhận gửi thành công của batch, còn trường `Tổng đã gửi và commit` vẫn dùng bộ đếm tăng cố định theo `batch_size`. Các giới hạn của logic đếm và kiểm tra kết quả trước commit được mô tả ở phần [Đọc log tiến độ](#3-đọc-log-tiến-độ).
+
 ## Insights
 
 ### 1. Chi phí truyền qua mạng rất lớn khi xử lý dữ liệu lớn

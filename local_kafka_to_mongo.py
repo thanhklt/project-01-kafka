@@ -1,7 +1,7 @@
 import threading
 import json
 from confluent_kafka import Consumer, KafkaException, TopicPartition
-from pymongo import MongoClient
+from pymongo import MongoClient, UpdateOne
 
 from config.settings import load_settings
 
@@ -21,7 +21,7 @@ CONSUME_CONFIG = {
 }
 
 def local_kafka_to_mongo(worker_id, stop):
-    count = 0
+    total_count = 0
     batch_size = 500
 
     consumer_info = CONFIG.destination.to_client_config()
@@ -37,12 +37,13 @@ def local_kafka_to_mongo(worker_id, stop):
 
     # Gọi poll()
     try:
+
         while not stop.is_set():
+            
+            success_count = 0
             messages = consumer.consume(
                 num_messages=batch_size,
                 timeout=1.0)
-
-            count += batch_size
 
             if len(messages) == 0:
                 continue  # Chưa có message, tiếp tục chờ
@@ -50,6 +51,10 @@ def local_kafka_to_mongo(worker_id, stop):
             for message in messages:
                 if message.error():
                     raise KafkaException(message.error())
+                else:
+                    success_count += 1
+                    total_count += 1
+
 
             payloads = []
             next_offsets = {}
@@ -58,6 +63,12 @@ def local_kafka_to_mongo(worker_id, stop):
                 if not isinstance(payload, dict):
                     raise ValueError(
                         f"Payload phải là JSON object: "
+                        f"partition={message.partition()}, "
+                        f"offset={message.offset()}"
+                    )
+                if payload.get("_id") is None:
+                    raise ValueError(
+                        f"Payload phải có _id khác null để upsert: "
                         f"partition={message.partition()}, "
                         f"offset={message.offset()}"
                     )
@@ -73,15 +84,26 @@ def local_kafka_to_mongo(worker_id, stop):
                     message.offset() + 1,
                 )
 
+            operations = []
+            for payload in payloads:
+                operations.append(
+                    UpdateOne(
+                        {"_id": payload["_id"]},
+                        {"$setOnInsert": {
+                            key: value
+                            for key, value in payload.items()
+                            if key != "_id"
+                        }},
+                        upsert=True,
+                    )
+                )
+            collection.bulk_write(operations)
 
-            collection.insert_many(payloads)
-            # Phân partition của topic dựa trên batch_size
             offsets = [
                 TopicPartition(topic, partition, offset)
                 for (topic, partition), offset
                 in next_offsets.items()
             ]
-
             committed = consumer.commit(
                 offsets=offsets,
                 asynchronous=False,
@@ -89,8 +111,8 @@ def local_kafka_to_mongo(worker_id, stop):
 
             print(
                 f"Worker {worker_id} | "
-                f"Batch {len(messages)} message | "
-                f"Tổng đã gửi và commit: {count}"
+                f"Số lượng msg từ kafka: {success_count} message | "
+                f"Tổng đã gửi và commit: {total_count} message"
             )
 
     finally:

@@ -26,7 +26,7 @@ Project gồm ba tác vụ chính:
 
 1. **Khảo sát dữ liệu nguồn:** dùng `count_message.py` để liệt kê partition và ước lượng số message còn được lưu trên remote Kafka thông qua offset.
 2. **Remote Kafka → Local Kafka:** dùng `remote_to_local_kafka.py` để consume dữ liệu nguồn và produce vào topic local theo batch tối đa 500 message.
-3. **Local Kafka → MongoDB:** dùng `local_kafka_to_mongo.py` để consume dữ liệu local, chuyển JSON thành document và ghi vào MongoDB bằng `insert_many()`.
+3. **Local Kafka → MongoDB:** dùng `local_kafka_to_mongo.py` để consume dữ liệu local, chuyển JSON thành document và upsert theo `_id` bằng `bulk_write()` với các thao tác `UpdateOne`.
 
 
 | Thành phần               | Công nghệ                                       |
@@ -181,8 +181,8 @@ Các node có named volume riêng `broker_data_0`, `broker_data_1`, `broker_data
 | ---------------------------- | ---------------------------------------------------------------------------------------- |
 | MongoDB URI                  | `mongodb://localhost:27017`, khai báo trực tiếp trong `local_kafka_to_mongo.py`       |
 | Database / collection        | `kafka` / `product_view`                                                                 |
-| Dữ liệu đầu vào MongoDB | Mỗi Kafka value phải là JSON object                                                   |
-| Ghi dữ liệu                | `collection.insert_many(payloads)` theo batch                                            |
+| Dữ liệu đầu vào MongoDB | Mỗi Kafka value phải là JSON object, có `_id` khác `null` và ổn định cho cùng một sự kiện |
+| Ghi dữ liệu                | `collection.bulk_write(operations)` với `UpdateOne(..., upsert=True)` và `$setOnInsert` theo `_id` |
 | MongoDB storage              | Bind mount `infra/mongodb/` vào `/data/db`; `docker compose down -v` không xóa thư mục này |
 | AKHQ                         | Truy cập[AKHQ local](http://localhost:8180); cấu hình đăng nhập nằm trong Compose |
 | AKHQ → Kafka                | Dùng`kafka-0:9092,kafka-1:9092,kafka-2:9092` trong Docker network                       |
@@ -327,12 +327,12 @@ Script: [`remote_to_local_kafka.py`](remote_to_local_kafka.py).
 3. Kafka phân partition giữa các consumer. Worker lấy tối đa 500 message qua `consume(num_messages=500, timeout=1.0)`; batch có thể ít hơn 500.
 4. Kiểm tra lỗi message rồi gọi `producer.produce()` cho từng value vào topic `product_view` ở `destination`.
 5. Gom `next_offset = message.offset() + 1` theo từng cặp `(topic, partition)` của **nguồn**.
-6. Gọi `producer.flush(timeout=30)` một lần cho batch, rồi commit đồng bộ danh sách source offset bằng `consumer.commit(offsets=..., asynchronous=False)`.
+6. Gọi `producer.flush(timeout=30)` một lần cho batch, kiểm tra `failed_messages` và số message còn chờ (`remaining`). Chỉ khi không có lỗi delivery và `remaining == 0` mới commit đồng bộ danh sách source offset bằng `consumer.commit(offsets=..., asynchronous=False)`.
 7. In tiến độ và tiếp tục lấy batch mới.
 
 Producer local bật `enable.idempotence=True`, `acks=all`. Script hiện chỉ chuyển **value**; không truyền lại key, headers, timestamp hay chỉ định partition đích. Vì vậy partition và offset ở local không phải bản sao định danh partition/offset nguồn.
 
-**Giới hạn xác nhận gửi hiện tại:** script chưa kiểm tra `remaining` trả về từ `flush()` trước khi commit; biến lỗi callback được dùng chung và chỉ kiểm tra sau commit. Do đó trình tự hiện tại chưa bảo đảm toàn bộ batch đã được local xác nhận trước khi source offset tiến lên. Đây là điểm cần hoàn thiện nếu dùng pipeline với yêu cầu bảo toàn dữ liệu chặt chẽ.
+`flush(timeout=30)` trả về khi hàng đợi hết hoặc đủ thời gian chờ; hết timeout không có nghĩa các message còn chờ đã gửi thất bại. Nếu local đã nhận message nhưng commit remote thất bại, lần chạy sau có thể gửi lại message đó. `enable.idempotence=True` không khử trùng những lần ứng dụng chủ động gửi lại sau khi đọc lại nguồn.
 
 ### 2. Local Kafka cluster → MongoDB
 
@@ -341,14 +341,16 @@ Script: [`local_kafka_to_mongo.py`](local_kafka_to_mongo.py).
 1. Tạo số worker theo `mirror.consumer_count`.
 2. Mỗi worker kết nối Kafka `destination`, cùng group `local_kafka_to_mongo`, subscribe `product_view`.
 3. Lấy batch tối đa 500 message và kiểm tra lỗi Kafka.
-4. Dùng `json.loads(message.value())` để chuyển từng payload thành Python `dict`. Payload không phải JSON object làm worker báo lỗi.
-5. Gom document rồi ghi một lần bằng `mongo_client["kafka"]["product_view"].insert_many(payloads)`.
+4. Dùng `json.loads(message.value())` để chuyển từng payload thành Python `dict`. Payload không phải JSON object, thiếu `_id` hoặc có `_id=null` làm worker báo lỗi trước khi ghi và commit.
+5. Tạo `UpdateOne` cho từng payload, lọc theo `_id`, đặt `upsert=True` và dùng `$setOnInsert` cho các trường còn lại. Gửi danh sách thao tác bằng `mongo_client["kafka"]["product_view"].bulk_write(operations)`.
 6. Sau khi lệnh ghi trả về thành công, commit đồng bộ `offset cuối đã xử lý + 1` cho từng partition local trong batch.
 7. In tiến độ và tiếp tục xử lý.
 
-Chặng này không dùng Kafka transaction kết hợp MongoDB. Nếu đã ghi database nhưng tiến trình dừng trước commit Kafka, batch có thể được đọc lại; hiện chưa có cơ chế upsert/deduplicate theo Kafka origin. `insert_many()` cũng có thể ghi thành công một phần trước khi gặp lỗi. Vì vậy chưa có bảo đảm exactly-once cho toàn pipeline.
+Chặng này giữ thứ tự **ghi MongoDB thành công rồi mới commit Kafka**. Nếu ghi database xong nhưng tiến trình dừng hoặc commit thất bại, batch có thể được đọc lại. Upsert theo `_id` giúp lần xử lý lại tìm thấy document đã có, giữ nguyên dữ liệu và tiếp tục commit mà không chèn thêm bản sao cùng `_id`.
 
-Script giữ nguyên `_id` nếu payload có trường này. Gửi lại document có cùng `_id` sẽ gây lỗi duplicate key; nếu payload không có `_id`, PyMongo tạo `_id` mới và lần đọc lại có thể thêm document trùng nội dung. `insert_many()` hiện dùng mặc định `ordered=True`: gặp lỗi sẽ dừng phần còn lại của batch, exception làm worker thoát và batch đó chưa được commit Kafka. Xem [PyMongo insert operations](https://www.mongodb.com/docs/languages/python/pymongo-driver/current/crud/insert/).
+MongoDB có unique index `_id_`. Với `upsert=True`, document chưa tồn tại sẽ được tạo; document đã tồn tại không bị thay đổi bởi `$setOnInsert`, kể cả khi payload gửi lại có nội dung khác. Điều kiện để mỗi sự kiện có một document là nguồn phải cung cấp `_id` duy nhất cho sự kiện và giữ nguyên giá trị đó khi gửi lại. Nội dung giống nhau nhưng có `_id` khác nhau vẫn được lưu thành các document riêng; không tạo `_id` ngẫu nhiên mới khi đọc lại message. Xem [MongoDB `$setOnInsert`](https://www.mongodb.com/docs/v8.0/reference/operator/update/setoninsert/).
+
+`bulk_write()` vẫn có thể ghi thành công một phần trước khi gặp lỗi; worker chỉ commit khi cả lệnh ghi thành công. Những thao tác đã ghi có thể được xử lý lại bằng upsert. Đây là cơ chế khử trùng theo `_id` sự kiện, chưa phải bảo đảm exactly-once cho toàn pipeline.
 
 ### 3. Đọc log tiến độ
 
@@ -361,14 +363,14 @@ Worker 0 | Batch 500 message | Success message 500 |Tổng đã gửi và commit
 Chặng local → MongoDB có dạng log:
 
 ```text
-Worker 0 | Batch 500 message | Tổng đã gửi và commit: 500
+Worker 0 | Số lượng msg từ kafka: 500 message | Tổng đã gửi và commit: 500 message
 ```
 
-`Batch N message` lấy từ `len(messages)`, là số message thực tế trong batch. Trường tổng hiện dùng biến đếm tăng cố định 500; riêng chặng MongoDB còn tăng trước khi kiểm tra batch rỗng. Đây là bộ đếm riêng của từng worker, được đặt lại khi worker khởi động.
+Ở chặng remote → local, `Batch N message` lấy từ `len(messages)`, là số message thực tế trong batch. `Success message` dùng biến `success_count` (thay tên `success_message` của v1.0), được đặt lại về `0` đầu mỗi batch và chỉ tăng trong delivery callback khi `err is None`. `total_count` cộng dồn từng message được xác nhận gửi thành công trong suốt phiên chạy của worker; không còn cộng cố định 500 cho mỗi batch.
 
-`Success message` ở chặng đầu được tăng trong delivery callback khi `err is None`; callback được xử lý khi producer được poll/flush. Code còn giữ một đoạn tăng biến dựa trên `delivery["confirmed"]` ngay sau `produce()`, trước `flush()`; đoạn này không xác nhận kết quả của message vừa đưa vào hàng đợi. Bộ đếm callback cũng không khắc phục việc chưa kiểm tra `remaining` và lỗi của cả batch trước commit.
+Ở chặng local → MongoDB, `success_count` được đặt lại về `0` ở đầu mỗi batch và đếm số message Kafka không có lỗi trong batch đó; `total_count` cộng dồn số message này trong suốt phiên chạy của worker. Hai bộ đếm tăng trước khi parse JSON, ghi database và commit. Các bộ đếm này cũng không phải số document mới được thêm vào MongoDB: nhiều message cùng `_id` có thể chỉ tương ứng một document.
 
-Vì vậy không dùng trường tổng trong log để đối soát số message thành công hoặc benchmark. Nên đo theo committed offset, dữ liệu đích và thời gian thực tế.
+Các bộ đếm là riêng của từng worker: `success_count` được đặt lại ở mỗi batch, còn `total_count` được đặt lại khi worker khởi động. Log được in sau lệnh commit, nhưng bản thân bộ đếm tăng trước commit và chưa kiểm tra lỗi commit theo từng partition. Khi đối soát, cần kết hợp committed offset, số document theo `_id` và thời gian thực tế.
 
 ## Lưu dữ liệu và đối soát
 
@@ -393,7 +395,7 @@ Với cấu hình hiện tại, xóa volume Kafka local rồi chạy lại có t
 3. Đọc lag ở ít nhất hai thời điểm để biết backlog đang tăng hay giảm. Tổng message còn lưu ở remote không phải backlog của group.
 4. Đếm document thực tế bằng `db.product_view.countDocuments({})`, xét cả dữ liệu từ các phiên chạy trước và lỗi ghi/commit trong log.
 
-Watermark chỉ cho khoảng offset, và các phép đọc xuyên hệ thống không tạo thành một snapshot nguyên tử. Hai chặng không lưu Kafka origin để đối soát từng record, nên việc số lượng bằng nhau chưa chứng minh dữ liệu được chuyển đầy đủ. Muốn đọc lại toàn bộ nguồn sau khi làm mới local cần chủ động chọn group mới hoặc reset group nguồn khi consumer đã dừng, đồng thời có phương án xử lý dữ liệu MongoDB cũ; script hiện không tự thực hiện các bước này.
+Watermark chỉ cho khoảng offset, và các phép đọc xuyên hệ thống không tạo thành một snapshot nguyên tử. Hai chặng không lưu Kafka origin để đối soát từng record, nên việc số lượng bằng nhau chưa chứng minh dữ liệu được chuyển đầy đủ. Upsert khử trùng theo `_id`, vì vậy số message đã xử lý có thể lớn hơn số document mới được thêm. Muốn đọc lại toàn bộ nguồn sau khi làm mới local cần chủ động chọn group mới hoặc reset group nguồn khi consumer đã dừng, đồng thời giữ `_id` sự kiện ổn định để đối chiếu với MongoDB cũ; script hiện không tự thực hiện việc đổi hoặc reset group.
 
 ## Lịch sử thay đổi
 
@@ -441,7 +443,28 @@ Ví dụ log của một batch gửi thành công 500 message:
 Worker 0 | Batch 500 message | Success message 500 |Tổng đã gửi và commit: 500
 ```
 
-`Success message` là số xác nhận gửi thành công của batch, còn trường `Tổng đã gửi và commit` vẫn dùng bộ đếm tăng cố định theo `batch_size`. Các giới hạn của logic đếm và kiểm tra kết quả trước commit được mô tả ở phần [Đọc log tiến độ](#3-đọc-log-tiến-độ).
+Ở v1.0, `Success message` là số xác nhận gửi thành công của batch, còn trường `Tổng đã gửi và commit` dùng bộ đếm tăng cố định theo `batch_size`. Cách đếm hiện tại được cập nhật ở v1.1 và mô tả tại phần [Đọc log tiến độ](#3-đọc-log-tiến-độ).
+
+### v1.1 — Sửa bộ đếm message và upsert MongoDB theo `_id`
+
+**Sửa cách cộng dồn `success_message` / `success_count` và `total_count` ở chặng remote → local:**
+
+- Dùng `success_count` thay cho tên `success_message` trước đây, đặt lại về `0` khi bắt đầu mỗi batch để số thành công của batch trước không cộng sang batch sau.
+- Chỉ tăng `success_count` và `total_count` trong `on_delivery()` khi `err is None`; bỏ đoạn tăng đếm ngay sau `produce()` dựa trên `delivery["confirmed"]`.
+- `total_count` giữ tổng số message được local xác nhận thành công của worker, thay cho cách cộng cố định `batch_size`. Ví dụ hai batch lần lượt thành công 500 và 120 message sẽ có `success_count` là 500 rồi 120, còn `total_count` là 500 rồi 620.
+- Kiểm tra lỗi delivery và `remaining` sau `flush(timeout=30)` trước khi commit source offset.
+
+Ở chặng local → MongoDB, `success_count` cũng được đặt lại về `0` đầu mỗi batch; `total_count` tiếp tục cộng dồn theo số message Kafka không có lỗi mà worker đã nhận.
+
+**Giữ document MongoDB duy nhất theo `_id` sự kiện bằng upsert:**
+
+- Thay `insert_many()` bằng `bulk_write()` với các `UpdateOne(..., upsert=True)` lọc theo `_id` nguồn.
+- Tạo danh sách phẳng các thao tác bằng `operations.append(UpdateOne(...))` để truyền vào `bulk_write()`.
+- Dùng `$setOnInsert` để chỉ chèn dữ liệu khi `_id` chưa tồn tại; khi cùng sự kiện được gửi hoặc đọc lại, giữ nguyên document đã có.
+- Yêu cầu payload là JSON object có `_id` khác `null`. Cùng một sự kiện phải giữ cùng `_id` qua mọi lần gửi lại.
+- Chỉ commit Kafka sau khi MongoDB ghi thành công, để batch chưa ghi xong có thể được đọc lại.
+
+Ví dụ: sự kiện `_id="event-123"` được chuyển đến hai lần vẫn tương ứng một document trong `kafka.product_view`. Nếu MongoDB đã ghi nhưng commit Kafka thất bại, lần xử lý lại tìm thấy document cũ và không tạo thêm bản sao cùng `_id`.
 
 ## Insights
 
@@ -488,7 +511,7 @@ Offset commit là **vị trí tiếp theo**, nên sau khi xử lý offset `125` 
 
 **Partition và consumer group.** Với consumer group thông thường trong project, một partition chỉ được giao cho một consumer trong group tại một thời điểm. Topic có 3 partition thì tối đa 3 consumer trong cùng group có partition để xử lý; tăng thread vượt số này không tự tăng mức song song. Hai chặng có group và cluster riêng nên tiến độ được quản lý độc lập.
 
-**Xác thực và idempotence.** `SASL_PLAINTEXT` xác thực qua SASL nhưng không mã hóa đường truyền bằng TLS. Producer bật idempotence để hạn chế trùng do retry khi gửi; thiết lập này chưa giải quyết việc ứng dụng đọc và gửi lại batch sau restart, cũng chưa khử trùng document MongoDB.
+**Xác thực và idempotence.** `SASL_PLAINTEXT` xác thực qua SASL nhưng không mã hóa đường truyền bằng TLS. Producer bật idempotence để hạn chế trùng do retry khi gửi; thiết lập này chưa giải quyết việc ứng dụng đọc và gửi lại batch sau restart. Chặng MongoDB dùng upsert theo `_id` sự kiện để khử trùng khi xử lý lại.
 
 ### 4. Thao tác với group.id và hành vi của Docker Compose
 

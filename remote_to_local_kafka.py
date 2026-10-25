@@ -23,7 +23,7 @@ PRODUCER_CONFIG = {
 
 
 def remote_to_local_kafka(worker_id, stop):
-    count = 0
+    total_count = 0
     batch_size = 500
 
     consumer_info = CONFIG.source.to_client_config()
@@ -41,14 +41,19 @@ def remote_to_local_kafka(worker_id, stop):
     
     producer = Producer(producer_info)
 
-    # Gọi poll()
+    # Gọi consumer
     try:
         while not stop.is_set():
+
+            # Thông số của mỗi lần consumer:
+            success_count = 0
+            failed_messages = []
+
             messages = consumer.consume(
                 num_messages=batch_size,
                 timeout=1.0
             )
-            success_message = 0
+
             if len(messages) == 0:
                 continue  # Chưa có message, tiếp tục chờ
 
@@ -56,18 +61,15 @@ def remote_to_local_kafka(worker_id, stop):
                 if message.error():
                     raise KafkaException(message.error())
 
-            delivery = {
-                "confirmed": False, 
-                "error": None
-            }
-            def on_delivery(err, delivered_message):
-                nonlocal success_message
+            def on_delivery(err, msg):
+                nonlocal success_count
+                nonlocal total_count
 
                 if err is None:
-                    success_message += 1
-
-                delivery["confirmed"] = True
-                delivery["error"] = err
+                    success_count += 1
+                    total_count += 1
+                else:
+                    failed_messages.append((msg,err))
  
             next_offsets = {}
             for message in messages:
@@ -77,32 +79,34 @@ def remote_to_local_kafka(worker_id, stop):
                     on_delivery=on_delivery,
                 )
 
-                # check if delivery success 
-                if delivery["confirmed"]:
-                    success_message += 1
-
                 partition_key = (message.topic(), message.partition())
                 next_offsets[partition_key] = message.offset() + 1
+
+            # Gom hết msg còn sót lại
+            remaining = producer.flush(timeout=30)
+
+            if failed_messages:
+                raise KafkaException(f"Có {len(failed_messages)} message gửi thất bại. Lỗi đầu tiên: {failed_messages[0][1]}")
+
+            if remaining > 0:
+                raise KafkaException(f"Có {remaining} message gửi thất bại. Lỗi đầu tiên: {failed_messages[0][1]}")
             
-            remaining = producer.flush(timeout=30) # Gửi hết tin nhắn
-            offsets = [
-                TopicPartition(topic, partition, offset)
-                for (topic, partition), offset in next_offsets.items()
-            ]
+            offsets = []
+            for (topic, partition), offset in next_offsets.items():
+                offsets.append(TopicPartition(topic, partition, offset))
+
             consumer.commit(
                 offsets=offsets, 
                 asynchronous=False
             )
 
-            count += batch_size
-            if delivery["error"] != None:
-                raise KafkaException(delivery["error"])
-                
+
+
             print(
                 f"Worker {worker_id} | "
                 f"Batch {len(messages)} message | "
-                f"Success message {success_message} |"
-                f"Tổng đã gửi và commit: {count}"
+                f"Success message {success_count} |"
+                f"Tổng đã gửi và commit: {total_count}"
             )
     finally:
         consumer.close()
